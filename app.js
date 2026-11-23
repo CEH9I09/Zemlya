@@ -16,16 +16,19 @@ const stages = [
 ];
 const archivedStage = {id:'declined',name:'Отказ',color:'archive-tone'};
 const callbackStage = {id:'callback',name:'Перезвонить позже',color:'callback-tone'};
+const removedStage = {id:'import-removed',name:'Убрано из загрузки',color:'archive-tone'};
 const separateViews = {callback:callbackStage,archive:archivedStage};
 const allStages = [...stages,...Object.values(separateViews)];
-const stageById = Object.fromEntries(allStages.map(stage => [stage.id,stage]));
+const stageById = Object.fromEntries([...allStages,removedStage].map(stage => [stage.id,stage]));
 const fields = [
   {id:'name', label:'ФИО / имя', aliases:['фио','ф и о','фамилия имя отчество','фио кандидата','фио соискателя','имя','имя кандидата','имя соискателя','имя откликнувшегося','кандидат','соискатель','applicant','candidate','name','full name','full_name']},
   {id:'phone', label:'Телефон', aliases:['телефон','номер','номер телефона','номер кандидата','телефон кандидата','телефон соискателя','контактный телефон','мобильный телефон','мобильный','контакт','контакты','phone','phone number','phone_number','tel']},
   {id:'job', label:'Вакансия / объявление', aliases:['вакансия','название вакансии','название объявления','заголовок объявления','объявление','название','должность','наименование вакансии','позиция','vacancy','job','title','ad title','ad_title']},
   {id:'date', label:'Дата отклика', aliases:['дата','дата отклика','время отклика','дата и время отклика','дата создания','дата создания отклика','дата получения','отклик от','created at','created_at','date','response date']},
   {id:'sourceId', label:'ID отклика', aliases:['id отклика','ид отклика','номер отклика','идентификатор отклика','id заявки','id','response id','response_id','application id','application_id']},
-  {id:'adId', label:'ID объявления', aliases:['id объявления','ид объявления','номер объявления','id вакансии','vacancy id','ad id','ad_id','item_id']}
+  {id:'adId', label:'ID объявления', aliases:['id объявления','ид объявления','номер объявления','id вакансии','vacancy id','ad id','ad_id','item_id']},
+  {id:'callStatus', label:'Статус обзвона', aliases:['статус обзвона','статус звонка','результат звонка','результат обзвона','обзвонен','обзвонено','звонили','статус','call status','called']},
+  {id:'callAttempts', label:'Попытки дозвона', aliases:['попытки дозвона','число звонков','количество звонков','попытки обзвона','call attempts','calls']}
 ];
 const asText = value => String(value ?? '').trim();
 const clean = value => asText(value).toLowerCase().replaceAll('ё','е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
@@ -341,7 +344,7 @@ function suggestMapping(headers) {
   return Object.fromEntries(fields.map(field => {
     const aliases = new Set(field.aliases.map(clean));
     let column = normalized.findIndex((label,index) => !assigned.has(index) && aliases.has(label));
-    if(column < 0) column = normalized.findIndex((label,index) => !assigned.has(index) && fallback[field.id].test(label));
+    if(column < 0 && fallback[field.id]) column = normalized.findIndex((label,index) => !assigned.has(index) && fallback[field.id].test(label));
     if(column >= 0) assigned.add(column);
     return [field.id,column];
   }));
@@ -365,7 +368,7 @@ function contactsFromRows(rows, headers, mapping, defaultJob, date1904) {
   const used = new Set(Object.values(mapping));
   let skipped = 0;
   const contacts = [];
-  for(const row of rows) {
+  for(const [index,row] of rows.entries()) {
     if(!row.some(cell => asText(cell))) continue;
     const read = key => asText(row[mapping[key]]);
     const name = read('name');
@@ -375,10 +378,21 @@ function contactsFromRows(rows, headers, mapping, defaultJob, date1904) {
     contacts.push({
       name,phone,job:read('job') || asText(defaultJob),sourceId:read('sourceId'),adId:read('adId'),
       date:sheetDate(row[mapping.date],date1904),
+      importRow:index+1,importCalled:wasCalledInFile(read('callStatus'),read('callAttempts')),
       extra:row.flatMap((value,index) => used.has(index) || !asText(value) ? [] : [[headers[index] || 'Колонка ' + (index + 1),asText(value)]])
     });
   }
   return {contacts,skipped};
+}
+const calledStatuses = new Set([
+  'да','true','1','yes','обзвонен','обзвонено','обзвонили','позвонили','звонили','дозвонились','связались',
+  'звонок состоялся','звонок выполнен','обработан','обработано','недозвон','не дозвонились','не ответил',
+  'нет ответа','не берет трубку','перезвон','перезвонить','в работе','закрыт','закрыто','closed','called',
+  ...[...stages.slice(1),archivedStage,callbackStage].map(stage=>clean(stage.name))
+]);
+function wasCalledInFile(status,attempts) {
+  const normalized = clean(status);
+  return calledStatuses.has(normalized) || /^ндз(?: \d+)?$/.test(normalized) || Number(asText(attempts).replace(',','.')) > 0;
 }
 
 const exportHeaders = ['ФИО','Телефон','Объявление','Дата отклика','Статус','Комментарий','Попытки дозвона','Перезвонить','Всего откликов','ID отклика','ID объявления','История действий','Другие поля','Дата первого отклика','Возраст лида (дней)'];
@@ -537,6 +551,7 @@ const ageLabel = years => formatCount(years) + ' ' + ({one:'год',few:'год�
 const dialog = $('#dialog');
 const relativeDate = new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'short'});
 const exactDate = new Intl.DateTimeFormat('ru-RU',{dateStyle:'medium',timeStyle:'short'});
+const lifecycleDate = new Intl.DateTimeFormat('ru-RU',{dateStyle:'short',timeStyle:'medium'});
 const titles = {board:'Воронка',list:'Мои лиды',archive:archivedStage.name,callback:callbackStage.name,history:'История импорта'};
 const state = {
   account:null,members:[],revision:-1,contacts:[],imports:[],view:'board',drag:null,limits:{},
@@ -685,7 +700,7 @@ function hydrateContact(contact) {
   };
 }
 function planImport(records,{contacts,skipped=0,file,sheet='',restore=false,source='avito-file'}) {
-  const result = {added:0,duplicates:0,updated:0,skipped};
+  const result = {added:0,duplicates:0,called:0,updated:0,skipped};
   const entry = {id:uid(),at:Date.now(),file,sheet,restore,source};
   if(!restore) {
     const writes = contacts.map((incoming,position) => ({
@@ -724,11 +739,10 @@ async function persistCandidates(batch) {
       const unique = [...new Map(writes.map(lead=>[lead.id,lead])).values()];
       const assignments = Object.fromEntries(unique.filter(lead=>Object.hasOwn(lead,'assignedLogin'))
         .map(lead=>[lead.id,lead.assignedLogin]));
-      const blocked = await database.importBatch(fresh.revision,unique.map(leadData),[...(batch.logs??[]),entry],assignments);
-      result.added = Math.max(0,result.added-(blocked??0));
-      if(batch.restore) result.skipped += blocked??0;
-      else result.duplicates += blocked??0;
-      return result;
+      const saved = await database.importBatch(fresh.revision,unique.map(leadData),[...(batch.logs??[]),entry],assignments);
+      const {duplicates,called,skipped,importId} = saved;
+      result.added = Math.max(0,result.added-duplicates-called-skipped);
+      return {...result,duplicates,called,skipped:result.skipped+skipped,importId};
     } catch(error) {
       if(error.code !== '40001' || attempt === 3) throw error;
     }
@@ -780,12 +794,13 @@ function eventLabel(event) {
   switch(event.kind) {
     case 'import': return 'Отклик загружен' + (event.job ? ' · ' + event.job : '');
     case 'refresh': return 'Данные обновлены из выгрузки' + (event.job ? ' · ' + event.job : '');
-    case 'assignment': return event.assignee ? 'Назначен сотрудник: '+event.assignee : 'Ответственный снят';
+    case 'assignment': return event.assignee ? 'Передан сотруднику: '+event.assignee : 'Ответственный снят';
     case 'dial': return 'Вызов по номеру';
     case 'call': return 'Звонок · ' + (event.status === 'new' ? 'Без смены статуса' : stageById[event.status]?.name || 'В процессе') + (event.note ? ' · ' + event.note : '');
     case 'status': return 'Статус изменён · ' + (stageById[event.status]?.name || 'В процессе');
     case 'note': return event.note ? 'Заметка · ' + event.note : 'Комментарий очищен';
     case 'archive': return 'Перенесён во вкладку «Отказ»';
+    case 'import_removed': return 'Убран из воронки при очистке загрузки';
     case 'restore': return 'Возвращён в воронку' + (event.status ? ' · ' + (stageById[event.status]?.name || event.status) : '');
     case 'reminder': return event.reminder ? 'Перезвонить · ' + exactDate.format(event.reminder) : 'Напоминание снято';
     default: return 'Карточка обновлена';
@@ -897,6 +912,20 @@ function quickActions(contact,compact=false) {
   return '<div class="quick-actions' + (compact ? ' card-quick-actions' : '') + '" role="group" aria-label="Быстрые действия">' +
     calls + other + '</div>';
 }
+function lifecycleHTML(contact) {
+  const events = contact.events.filter(event => validTime(event.at));
+  const appeared = events.find(event=>event.kind === 'import');
+  const transferred = events.findLast(event=>event.kind === 'assignment' && event.assignee);
+  const closed = contact.status === archivedStage.id
+    ? events.findLast(event=>event.kind === 'archive')
+    : contact.status === 'won' ? events.findLast(event=>event.status === 'won') : null;
+  return '<dl class="lead-lifecycle">' + [
+    ['Появился',appeared], ['Передан',transferred,transferred?.assignee], ['Закрыт',closed]
+  ].map(([label,event,person]) => '<div><dt>' + label + '</dt><dd>' + (event
+    ? '<time datetime="' + new Date(event.at).toISOString() + '">' + safe(lifecycleDate.format(event.at)) + '</time>' +
+      (person ? '<span>' + safe(person) + '</span>' : '')
+    : '—') + '</dd></div>').join('') + '</dl>';
+}
 function card(contact,stage) {
   const latest = contact.events.findLast(event => event.kind !== 'repeat');
   const summary = asText(contact.note) || (latest ? eventLabel(latest) : '');
@@ -904,7 +933,7 @@ function card(contact,stage) {
     (arrivals.delete(contact.id) ? ' entering' : '') + '" data-card="' + safe(contact.id) +
     '"><div class="card-top">' + candidateName(contact) + '</div>'+
     '<div class="card-phone">'+phoneHTML(contact)+'</div>'+candidateWork(contact)+candidateLocationAge(contact)+
-    '<div class="card-bottom"><span class="tag '+stage.color+'">'+stage.name+'</span></div>'+
+    '<div class="card-bottom"><span class="tag '+stage.color+'">'+stage.name+'</span></div>'+lifecycleHTML(contact)+
     callbackHTML(contact)+
     (summary ? '<p class="card-summary" title="'+safe(summary)+'">'+icon(latest && !asText(contact.note) ? 'history' : 'note')+
       '<span>'+safe(summary)+'</span></p>' : '')+
@@ -916,32 +945,89 @@ function showNext(id,length) {
 }
 function renderHistory() {
   const history = state.imports;
-  $('#history').innerHTML = history.length ? '<div class="panel"><table class="table"><thead><tr><th>Файл</th><th>Дата загрузки</th><th>Добавлено</th><th>Совпадения</th><th>Пропущено</th><th scope="col">Действия</th></tr></thead><tbody>' +
+  $('#history').innerHTML = history.length ? '<div class="panel"><table class="table"><thead><tr><th>Файл</th><th>Дата загрузки</th><th>Добавлено</th><th>Повторы</th><th>Обзвоненные</th><th>Пропущено</th><th scope="col">Действия</th></tr></thead><tbody>' +
     history.map(item => '<tr><td><strong>' + safe(item.file) + '</strong>' +
       (item.sheet ? '<div class="subtle">' + safe(item.sheet) + '</div>' : '') +
       '</td><td>' + exactDate.format(item.at) + '</td><td>' + item.added +
-      '</td><td>' + item.duplicates + (item.updated ? ' · обновлено ' + item.updated : '') + '</td><td>' + item.skipped + '</td><td>' +
+      '</td><td>' + item.duplicates + (item.updated ? ' · обновлено ' + item.updated : '') + '</td><td>' + (item.called ?? '—') + '</td><td>' + item.skipped +
+      '</td><td><div class="row-actions">' +
+      (item.hasReport ? '<button type="button" class="button" data-import-report="' + safe(item.id) + '">Повторы и обзвоненные</button>' : '') +
       (isOwner() && item.added && !item.restore && (item.source ?? 'avito-file') === 'avito-file'
-        ? '<button type="button" class="button" data-clean-import="' + safe(item.id) + '">Убрать из воронки</button>' : '') +
-      '</td></tr>').join('') +
+        ? '<button type="button" class="button" data-clean-import="' + safe(item.id) + '">Убрать из воронки</button>' +
+          '<button type="button" class="button" data-removed-import="' + safe(item.id) + '">Убранные</button>' : '') +
+      '</div></td></tr>').join('') +
     '</tbody></table></div>' : '<div class="empty-panel panel">Здесь появятся результаты загрузки файлов.</div>';
   $('#history').onclick = event => {
-    const button = event.target.closest('[data-clean-import]');
-    if(button) openImportCleanup(history.find(item => item.id === button.dataset.cleanImport));
+    const button = event.target.closest('[data-clean-import],[data-removed-import],[data-import-report]');
+    if(!button) return;
+    const {cleanImport,removedImport,importReport} = button.dataset;
+    const log = history.find(item=>item.id === (cleanImport ?? removedImport ?? importReport));
+    if(!log) return;
+    if(cleanImport) openImportCleanup(log);
+    if(removedImport) openRemovedImport(log);
+    if(importReport) openImportReport(log.id,log.file);
+  };
+}
+async function openImportReport(id,file) {
+  showDialog('Пропущенные записи',file,'<p class="loading">Загружаем отчёт…</p>','<button class="button" data-close>Закрыть</button>');
+  const body = $('.dialog-body');
+  try {
+    const rows = await database.importReport(id);
+    if(!dialog.open || !body.isConnected) return;
+    body.innerHTML = rows.length
+      ? '<div class="sample import-report"><table><thead><tr><th>Запись</th><th>ФИО</th><th>Телефон или ID</th><th>Причина</th></tr></thead><tbody>' +
+        rows.map(row=>'<tr><td>' + safe(row.row) + '</td><td>' + safe(row.name || 'Без имени') + '</td><td>' +
+          safe(formatPhone(row.phone) || row.sourceId || '—') + '</td><td>' +
+          (row.reason === 'called' ? 'Уже обзвонен' : 'Повтор') + '</td></tr>').join('') + '</tbody></table></div>'
+      : '<p class="dialog-copy">Для этой загрузки нет сохранённого списка пропущенных записей.</p>';
+  } catch(error) {
+    if(body.isConnected) body.innerHTML = '<p class="notice error" role="alert">' + safe(error.message) + '</p>';
+  }
+}
+function leadsFromImport(log,status) {
+  return state.contacts.filter(contact => {
+    const first = contact.events[0];
+    return contact.status === status && first?.kind === 'import' && first.at === log.at &&
+      (first.importId ?? log.id) === log.id;
+  });
+}
+function openRemovedImport(log) {
+  const contacts = leadsFromImport(log,removedStage.id);
+  showDialog('Убранные из загрузки',log.file,
+    contacts.length ? '<p class="dialog-copy">В воронку вернутся только карточки без звонков и найденных дублей.</p>' +
+      '<div class="transfer-list" id="removed-import-list">' + contacts.map(contact=>'<div class="removed-import-row" data-removed-lead="' +
+        safe(contact.id) + '"><strong>' + safe(labelOf(contact)) + '</strong><span>' +
+        safe(formatPhone(contact.phone) || 'Без телефона') + '</span><small class="import-duplicate-label" hidden>Повтор</small></div>').join('') + '</div>'
+      : '<p class="dialog-copy">В этой загрузке нет убранных карточек.</p>',
+    '<button class="button" data-close>Закрыть</button>' + (contacts.length
+      ? '<button class="button primary" id="restore-uncalled">Вернуть необзвоненных</button>' : ''));
+  if(!contacts.length) return;
+  const list = $('#removed-import-list');
+  database.importDuplicates(log.id).then(ids => {
+    if(!list.isConnected || !dialog.open) return;
+    const duplicates = new Set(ids);
+    for(const row of list.children) row.querySelector('small').hidden = !duplicates.has(row.dataset.removedLead);
+  }).catch(error=>{ if(list.isConnected && dialog.open) report(error); });
+  $('#restore-uncalled').onclick = async event => {
+    const button = event.currentTarget;
+    state.committing = button.disabled = true;
+    try {
+      const count = await database.restoreUncalledImport(log.id);
+      await refreshAfterWrite();
+      dialog.close();
+      toast(count ? 'Возвращено в воронку: ' + formatCount(count) : 'Нет необзвоненных лидов без совпадений.');
+    } catch(error) { report(error); }
+    finally { state.committing = button.disabled = false; }
   };
 }
 function openImportCleanup(log) {
   if(!isOwner() || !log) return;
-  const contacts = state.contacts.filter(contact => {
-    const first = contact.events[0];
-    return contact.status === 'new' && first?.kind === 'import' && first.at === log.at &&
-      (first.importId ?? log.id) === log.id;
-  });
+  const contacts = leadsFromImport(log,'new');
   const rows = contacts.map(contact => '<label class="transfer-row"><input type="checkbox" value="' + safe(contact.id) +
     '"><span class="transfer-person"><strong class="transfer-name">' + safe(labelOf(contact)) + '</strong><span class="transfer-phone">' +
-    safe(formatPhone(contact.phone) || 'Без телефона') + '</span></span><time>' + safe(dateOf(contact)) + '</time></label>').join('');
+    safe(formatPhone(contact.phone) || 'Без телефона') + '</span><small class="import-duplicate-label" hidden>Повтор</small></span><time>' + safe(dateOf(contact)) + '</time></label>').join('');
   showDialog('Убрать лидов загрузки', log.file + ' · ' + exactDate.format(log.at),
-    rows ? '<p class="dialog-copy">Отметь старые лиды. Они переместятся в «Отказ», откуда их можно вернуть.</p>' +
+    rows ? '<p class="dialog-copy">Отмеченные карточки попадут в «Убранные» этой загрузки.</p>' +
       '<fieldset class="transfer-fields" id="cleanup-fields"><legend class="sr-only">Лиды загрузки</legend>' +
       '<div class="transfer-picks cleanup-tools"><button class="button" type="button" id="cleanup-duplicates">Отметить совпадения</button>' +
       '<button class="button" type="button" id="cleanup-all">Отметить всех</button></div>' +
@@ -976,7 +1062,9 @@ function openImportCleanup(log) {
       if(!duplicates.isConnected || !dialog.open) return;
       let count = 0;
       for(const input of inputs) {
-        if(ids.has(input.value)) { input.checked = true; count++; }
+        const duplicate = ids.has(input.value);
+        input.closest('label').querySelector('.import-duplicate-label').hidden = !duplicate;
+        if(duplicate) { input.checked = true; count++; }
       }
       updateSelection();
       toast(count ? 'Совпадений в загрузке: ' + formatCount(count) : 'Среди сохранённых карточек совпадений нет.');
@@ -991,7 +1079,7 @@ function openImportCleanup(log) {
       const count = await database.archiveImport(log.id,ids);
       await refreshAfterWrite();
       dialog.close();
-      toast('Перемещено в «Отказ»: ' + formatCount(count));
+      toast('Убрано из воронки: ' + formatCount(count));
     } catch(error) { report(error); }
     finally {
       state.committing = fields.disabled = false;
@@ -1002,7 +1090,7 @@ function openImportCleanup(log) {
 function viewContacts() {
   const separate = separateViews[state.view];
   return state.contacts.filter(contact => separate ? contact.status === separate.id
-    : contact.status !== archivedStage.id && contact.status !== callbackStage.id);
+    : contact.status !== archivedStage.id && contact.status !== callbackStage.id && contact.status !== removedStage.id);
 }
 function filteredContacts(contacts) {
   const normalized = clean(state.query);
@@ -1108,29 +1196,33 @@ function timelineItems(contact) {
   }
   if(!events.length) return '<p class="feed-empty">Здесь появятся заметки и действия по анкете.</p>';
   const appearance = {
-    assignment:['user','Назначение'],note:['note','Заметка'],archive:['archive','Отказ'],restore:['left','Возвращение в воронку'],dial:['phone','Звонок'],call:['phone','Звонок'],status:['board','Этап изменён'],
+    assignment:['user','Передача'],note:['note','Заметка'],archive:['archive','Отказ'],import_removed:['archive','Убран из загрузки'],
+    restore:['left','Возвращение в воронку'],dial:['phone','Звонок'],call:['phone','Звонок'],status:['board','Этап изменён'],
     reminder:['clock','Перезвон'],import:['download','Отклик загружен'],refresh:['download','Данные обновлены']
   };
   return '<ol class="timeline">' + events.reverse().map(event => {
     const [glyph,title] = appearance[event.kind] ?? ['history','Действие'];
     const description = event.kind === 'note' ? event.note : eventLabel(event);
     return '<li class="timeline-item"><span class="timeline-icon">' + icon(glyph) + '</span><div class="timeline-entry"><div class="timeline-meta">' +
-      '<strong>' + title + '</strong><time datetime="' + new Date(event.at).toISOString() + '">' + safe((event.actor ? event.actor+' · ' : '')+exactDate.format(event.at)) +
+      '<strong>' + title + '</strong><time datetime="' + new Date(event.at).toISOString() + '">' + safe((event.actor ? event.actor+' · ' : '')+lifecycleDate.format(event.at)) +
       '</time></div>' + (description ? '<p>' + safe(description) + '</p>' : '') + '</div></li>';
   }).join('') + '</ol>';
 }
 function syncContactFeed(id) {
   if(!dialog.open || dialog.dataset.contactId !== id) return;
   const contact = currentContact(id);
-  if(contact) $('#contact-feed').innerHTML = timelineItems(contact);
+  if(contact) {
+    $('#contact-feed').innerHTML = timelineItems(contact);
+    $('#contact-lifecycle').innerHTML = lifecycleHTML(contact);
+  }
 }
 function syncOpenContact(force=false) {
   if(!dialog.open || !dialog.dataset.contactId) return;
   const id = dialog.dataset.contactId;
   const contact = currentContact(id);
-  if(!contact) {
+  if(!contact || contact.status === removedStage.id) {
     dialog.close();
-    toast('Карточка больше недоступна.');
+    toast(contact ? 'Карточка убрана из воронки.' : 'Карточка больше недоступна.');
     return;
   }
   const status = $('#contact-status');
@@ -1176,7 +1268,8 @@ function detailDialog(id) {
     '</div><div class="contact-grid"><aside class="contact-profile" aria-label="Данные анкеты"><section class="contact-panel"><h3>Контакты и данные</h3>' +
     '<div class="contact-phone">' + phoneHTML(contact) + (contact.phone ? '<button type="button" class="icon-button" id="copy-phone" aria-label="Копировать номер" title="Копировать номер">' +
     icon('copy') + '</button>' : '') + '</div>' + (facts ? '<dl class="contact-facts">' + facts + '</dl>' : '') +
-    '</section><form class="contact-panel" id="contact-stage-form"><h3>Этап воронки</h3><label class="field"><span class="sr-only">Этап</span><select id="contact-status">' +
+    '</section><section class="contact-panel"><h3>История лида</h3><div id="contact-lifecycle">' + lifecycleHTML(contact) +
+    '</div></section><form class="contact-panel" id="contact-stage-form"><h3>Этап воронки</h3><label class="field"><span class="sr-only">Этап</span><select id="contact-status">' +
     stageOptions + '</select></label><label class="field" id="reminder-field"' + (callbackAllowed(contact.status) ? '' : ' hidden') +
     '>Перезвонить<input type="datetime-local" id="contact-reminder" value="' + dateTimeValue(contact.reminder) + '"></label>' +
     '<p class="attempts" id="contact-attempts"' + (contact.attempts ? '' : ' hidden') + '>Попыток дозвона: ' + contact.attempts + '</p>' +
@@ -1328,7 +1421,7 @@ function showMapping() {
     displayColumns.map((_,index) => '<td>' + safe(asText(row[index]).slice(0,140)) + '</td>').join('') + '</tr>').join('') +
     '</tbody></table></div>' : '';
   showDialog('Проверка импорта',source.name,
-    '<p class="dialog-copy">Проверьте, как сопоставились столбцы. Для импорта выберите хотя бы имя или телефон.</p>' +
+    '<p class="dialog-copy">Выбери имя или телефон. Если в файле есть результаты звонков, сопоставь также статус обзвона или число попыток.</p>' +
     '<div class="fields">' + sheetField + headerField + mappingFields +
     '<label class="field full">Вакансия для строк без названия<input id="fallback-job" type="text" maxlength="250" placeholder="Например, курьер"></label></div>' +
     '<p class="notice" id="import-count" aria-live="polite"></p>' + sample,
@@ -1349,7 +1442,9 @@ function showMapping() {
     const label = $('#import-count');
     if(next.error) label.textContent = next.error;
     else {
+      const dialed = next.contacts.filter(contact=>contact.importCalled).length;
       label.textContent = 'Строк к проверке в базе: ' + formatCount(next.contacts.length) +
+        (dialed ? ' · Отмечено обзвоненных в файле: ' + formatCount(dialed) : '') +
         (next.skipped ? ' · Пропущено: ' + formatCount(next.skipped) : '');
     }
     label.classList.toggle('error',Boolean(next.error));
@@ -1371,9 +1466,11 @@ function showMapping() {
       const result = await persistCandidates({...next,file:source.name,sheet:sheets.length > 1 ? sheets[sheet] : ''});
       state.view = 'board';
       await refreshAfterWrite();
-      dialog.close();
       toast('Новых кандидатов: ' + formatCount(result.added) + ' · Совпадений: ' + formatCount(result.duplicates) +
+        (result.called ? ' · Обзвоненных: ' + formatCount(result.called) : '') +
         (result.skipped ? ' · пропущено ' + formatCount(result.skipped) : ''));
+      if(result.importId && (result.duplicates || result.called)) openImportReport(result.importId,source.name);
+      else dialog.close();
     } catch(error) {
       report(error);
       showMapping();
@@ -1434,6 +1531,7 @@ function readBackup(data) {
     }
     const {id,at,added,duplicates,skipped,updated} = log;
     return {id,at,added,duplicates,skipped,updated,file:asText(log.file),sheet:asText(log.sheet),restore:Boolean(log.restore),
+      ...(Number.isSafeInteger(log.called) && log.called >= 0 ? {called:log.called} : {}),
       ...(typeof log.source === 'string' ? {source:log.source} : {})};
   });
   return {contacts,logs};
@@ -1704,7 +1802,8 @@ function updateTransferControls() {
 }
 function syncTransferDialog() {
   if(!transfer || !dialog.open || transfer.sending) return;
-  const available = new Set(state.contacts.map(contact=>contact.id));
+  const transferable = state.contacts.filter(contact=>contact.status !== removedStage.id);
+  const available = new Set(transferable.map(contact=>contact.id));
   for(const id of transfer.ids) if(!available.has(id)) transfer.ids.delete(id);
   const recipient = $('#team-assignee');
   const chosen = recipient.value;
@@ -1714,7 +1813,7 @@ function syncTransferDialog() {
   recipient.value = members.some(member=>member.id === chosen) ? chosen : '';
   recipient.disabled = !members.length;
   const stage = $('#transfer-stage').value;
-  const contacts = state.contacts.filter(contact=>!stage || contact.status===stage);
+  const contacts = transferable.filter(contact=>!stage || contact.status===stage);
   transfer.contacts = contacts;
   const list = $('#transfer-list');
   const focusId = list.contains(document.activeElement) ? document.activeElement.value : null;

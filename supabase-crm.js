@@ -23,6 +23,13 @@
       realtime:{worker:false}
     });
     const leadFields = 'id,assignee,version,data';
+    async function importRpc(name,args) {
+      const result = await client.rpc(name,args);
+      if(result.error?.code === 'PGRST202') {
+        throw new Error('Обнови импорт в Supabase. Выполни весь файл supabase-import-fix.sql из новой сборки.');
+      }
+      return check(result);
+    }
 
     async function revision() {
       const row = check(await client.from('crm_change_clock').select('revision').eq('id',1).maybeSingle());
@@ -104,15 +111,21 @@
         check(await client.rpc('zemlya_save_lead',{p_id:id,p_version:version,p_data:data}));
       },
       async importBatch(revision,leads,imports,assignments) {
-        return check(await client.rpc('zemlya_import',{
+        return importRpc('zemlya_import_v2',{
           p_revision:revision,p_leads:leads,p_imports:imports,p_assignments:assignments
-        }));
+        });
       },
       async archiveImport(importId,ids) {
-        return check(await client.rpc('zemlya_archive_import',{p_import_id:importId,p_ids:ids}));
+        return importRpc('zemlya_archive_import',{p_import_id:importId,p_ids:ids});
       },
       async importDuplicates(importId) {
-        return check(await client.rpc('zemlya_import_duplicates',{p_import_id:importId}));
+        return importRpc('zemlya_import_duplicates',{p_import_id:importId});
+      },
+      async importReport(importId) {
+        return importRpc('zemlya_import_report',{p_import_id:importId});
+      },
+      async restoreUncalledImport(importId) {
+        return importRpc('zemlya_restore_uncalled_import',{p_import_id:importId});
       },
       async assign(ids,assignee) {
         return check(await client.rpc('zemlya_assign',{p_ids:ids,p_assignee:assignee}));
