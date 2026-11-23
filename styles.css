@@ -332,6 +332,7 @@ dialog::backdrop { background: #1e302755; backdrop-filter: blur(2px); }
 .transfer-filters { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .transfer-bulk { display: grid; gap: 9px; margin-bottom: 11px; }
 .transfer-picks, .transfer-exact { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; }
+.cleanup-tools { margin-block: 9px; }
 .transfer-bulk .button { min-height: 39px; }
 .transfer-exact .field { width: 10rem; margin: 0; }
 .transfer-stage-count { align-self: flex-end; margin: 0 0 8px 4px; color: var(--muted); font-size: .92rem; }

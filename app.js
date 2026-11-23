@@ -173,24 +173,6 @@ function responseSignature(contact) {
   const date = responseDate(contact.date);
   return JSON.stringify([date ? date.valueOf() : clean(contact.date),clean(contact.adId || contact.job)]);
 }
-function mergeResponse(current,incoming) {
-  const oldDate = responseDate(current.date);
-  const newDate = responseDate(incoming.date);
-  const older = oldDate && newDate && newDate < oldDate;
-  const merged = {...current};
-  const first = firstResponse(current);
-  if(newDate && (!first || newDate < first)) merged.firstResponseDate = incoming.date;
-  for(const key of ['name','phone','job','date','sourceId','adId']) {
-    if(incoming[key] && (!older || !merged[key])) merged[key] = incoming[key];
-  }
-  const extra = new Map(current.extra);
-  for(const [key,value] of incoming.extra) {
-    if(!older || !extra.has(key)) extra.set(key,value);
-  }
-  merged.extra = [...extra];
-  return merged;
-}
-
 function decodeText(bytes) {
   if(bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
   if(bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes);
@@ -702,46 +684,32 @@ function hydrateContact(contact) {
     responseKeys:contact.responseKeys ?? [responseSignature(contact)]
   };
 }
-function addEvent(contact,event) {
-  return {...contact,events:[...contact.events,event],updatedAt:event.at};
-}
 function planImport(records,{contacts,skipped=0,file,sheet='',restore=false,source='avito-file'}) {
   const result = {added:0,duplicates:0,updated:0,skipped};
+  const entry = {id:uid(),at:Date.now(),file,sheet,restore,source};
+  if(!restore) {
+    const writes = contacts.map((incoming,position) => ({
+      ...incoming,id:uid(),status:'new',note:'',attempts:0,reminder:null,source,firstResponseDate:incoming.date,
+      updatedAt:entry.at - position,responseKeys:[responseSignature(incoming)],
+      events:[{kind:'import',at:entry.at,job:incoming.job,importId:entry.id}]
+    }));
+    result.added = writes.length;
+    return {writes,result,entry:{...entry,...result}};
+  }
+
   const writes = [];
   const existing = new Map(records.map(contact => [contact.id,hydrateContact(contact)]));
   const identities = candidateIndex(existing.values());
-  const now = Date.now();
-  for(const [position,incoming] of contacts.entries()) {
-    const current = (restore && existing.get(incoming.id)) || identities.find(incoming,existing);
-    const responseKey = responseSignature(incoming);
-    let contact;
-    if(current) {
-      if(restore) {
-        contact = {...incoming,id:current.id};
-        result.updated++;
-      } else {
-        result.duplicates++;
-        const merged = mergeResponse(current,incoming);
-        const fieldsChanged = ['name','phone','job','date','firstResponseDate','sourceId','adId','extra'].some(field =>
-          JSON.stringify(current[field]) !== JSON.stringify(merged[field]));
-        const newResponseKey = !current.responseKeys.includes(responseKey);
-        if(!fieldsChanged && !newResponseKey) continue;
-        if(newResponseKey) merged.responseKeys = [...current.responseKeys,responseKey];
-        contact = fieldsChanged ? addEvent(merged,{kind:'refresh',at:now,job:incoming.job}) : merged;
-        result.updated++;
-      }
-    } else {
-      contact = restore ? incoming : {
-        ...incoming,id:uid(),status:'new',note:'',attempts:0,reminder:null,source,firstResponseDate:incoming.date,
-        updatedAt:now - position,responseKeys:[responseKey],events:[{kind:'import',at:now,job:incoming.job}]
-      };
-      result.added++;
-    }
+  for(const incoming of contacts) {
+    const current = existing.get(incoming.id) || identities.find(incoming,existing);
+    const contact = current ? {...incoming,id:current.id} : incoming;
+    if(current) result.updated++;
+    else result.added++;
     writes.push(contact);
     existing.set(contact.id,contact);
     identities.add(contact);
   }
-  return {writes,result,entry:{id:uid(),at:now,file,sheet,restore,source,...result}};
+  return {writes,result,entry:{...entry,...result}};
 }
 function leadData(contact) {
   const {assignee,assignedLogin,...data} = contact;
@@ -758,7 +726,8 @@ async function persistCandidates(batch) {
         .map(lead=>[lead.id,lead.assignedLogin]));
       const blocked = await database.importBatch(fresh.revision,unique.map(leadData),[...(batch.logs??[]),entry],assignments);
       result.added = Math.max(0,result.added-(blocked??0));
-      result.skipped += blocked??0;
+      if(batch.restore) result.skipped += blocked??0;
+      else result.duplicates += blocked??0;
       return result;
     } catch(error) {
       if(error.code !== '40001' || attempt === 3) throw error;
@@ -947,12 +916,88 @@ function showNext(id,length) {
 }
 function renderHistory() {
   const history = state.imports;
-  $('#history').innerHTML = history.length ? '<div class="panel"><table class="table"><thead><tr><th>Файл</th><th>Дата загрузки</th><th>Добавлено</th><th>Совпадения</th><th>Пропущено</th></tr></thead><tbody>' +
+  $('#history').innerHTML = history.length ? '<div class="panel"><table class="table"><thead><tr><th>Файл</th><th>Дата загрузки</th><th>Добавлено</th><th>Совпадения</th><th>Пропущено</th><th scope="col">Действия</th></tr></thead><tbody>' +
     history.map(item => '<tr><td><strong>' + safe(item.file) + '</strong>' +
       (item.sheet ? '<div class="subtle">' + safe(item.sheet) + '</div>' : '') +
       '</td><td>' + exactDate.format(item.at) + '</td><td>' + item.added +
-      '</td><td>' + item.duplicates + (item.updated ? ' · обновлено ' + item.updated : '') + '</td><td>' + item.skipped + '</td></tr>').join('') +
+      '</td><td>' + item.duplicates + (item.updated ? ' · обновлено ' + item.updated : '') + '</td><td>' + item.skipped + '</td><td>' +
+      (isOwner() && item.added && !item.restore && (item.source ?? 'avito-file') === 'avito-file'
+        ? '<button type="button" class="button" data-clean-import="' + safe(item.id) + '">Убрать из воронки</button>' : '') +
+      '</td></tr>').join('') +
     '</tbody></table></div>' : '<div class="empty-panel panel">Здесь появятся результаты загрузки файлов.</div>';
+  $('#history').onclick = event => {
+    const button = event.target.closest('[data-clean-import]');
+    if(button) openImportCleanup(history.find(item => item.id === button.dataset.cleanImport));
+  };
+}
+function openImportCleanup(log) {
+  if(!isOwner() || !log) return;
+  const contacts = state.contacts.filter(contact => {
+    const first = contact.events[0];
+    return contact.status === 'new' && first?.kind === 'import' && first.at === log.at &&
+      (first.importId ?? log.id) === log.id;
+  });
+  const rows = contacts.map(contact => '<label class="transfer-row"><input type="checkbox" value="' + safe(contact.id) +
+    '"><span class="transfer-person"><strong class="transfer-name">' + safe(labelOf(contact)) + '</strong><span class="transfer-phone">' +
+    safe(formatPhone(contact.phone) || 'Без телефона') + '</span></span><time>' + safe(dateOf(contact)) + '</time></label>').join('');
+  showDialog('Убрать лидов загрузки', log.file + ' · ' + exactDate.format(log.at),
+    rows ? '<p class="dialog-copy">Отметь старые лиды. Они переместятся в «Отказ», откуда их можно вернуть.</p>' +
+      '<fieldset class="transfer-fields" id="cleanup-fields"><legend class="sr-only">Лиды загрузки</legend>' +
+      '<div class="transfer-picks cleanup-tools"><button class="button" type="button" id="cleanup-duplicates">Отметить совпадения</button>' +
+      '<button class="button" type="button" id="cleanup-all">Отметить всех</button></div>' +
+      '<div class="transfer-list" id="cleanup-list">' + rows + '</div></fieldset>'
+      : '<p class="dialog-copy">В колонке «Лид» нет твоих карточек из этой загрузки.</p>',
+    '<button type="button" class="button" data-close>Закрыть</button>' +
+    (rows ? '<button type="button" class="button primary" id="cleanup-submit" disabled>Убрать выбранных</button>' : ''));
+  if(!rows) return;
+  dialog.classList.add('transfer-dialog');
+  const inputs = all('#cleanup-list input');
+  const toggle = $('#cleanup-all');
+  const duplicates = $('#cleanup-duplicates');
+  const submit = $('#cleanup-submit');
+  const selection = () => inputs.filter(input => input.checked);
+  function updateSelection() {
+    const count = selection().length;
+    toggle.textContent = count === inputs.length ? 'Снять отметки' : 'Отметить всех';
+    submit.disabled = !count;
+    submit.textContent = count ? 'Убрать выбранных (' + formatCount(count) + ')' : 'Убрать выбранных';
+  }
+  updateSelection();
+  $('#cleanup-list').onchange = updateSelection;
+  toggle.onclick = () => {
+    const mark = selection().length !== inputs.length;
+    for(const input of inputs) input.checked = mark;
+    updateSelection();
+  };
+  duplicates.onclick = async () => {
+    duplicates.disabled = true;
+    try {
+      const ids = new Set(await database.importDuplicates(log.id));
+      if(!duplicates.isConnected || !dialog.open) return;
+      let count = 0;
+      for(const input of inputs) {
+        if(ids.has(input.value)) { input.checked = true; count++; }
+      }
+      updateSelection();
+      toast(count ? 'Совпадений в загрузке: ' + formatCount(count) : 'Среди сохранённых карточек совпадений нет.');
+    } catch(error) { report(error); }
+    finally { duplicates.disabled = false; }
+  };
+  submit.onclick = async () => {
+    const ids = selection().map(input => input.value);
+    const fields = $('#cleanup-fields');
+    state.committing = fields.disabled = submit.disabled = true;
+    try {
+      const count = await database.archiveImport(log.id,ids);
+      await refreshAfterWrite();
+      dialog.close();
+      toast('Перемещено в «Отказ»: ' + formatCount(count));
+    } catch(error) { report(error); }
+    finally {
+      state.committing = fields.disabled = false;
+      updateSelection();
+    }
+  };
 }
 function viewContacts() {
   const separate = separateViews[state.view];
@@ -1304,9 +1349,7 @@ function showMapping() {
     const label = $('#import-count');
     if(next.error) label.textContent = next.error;
     else {
-      const {result} = planImport(state.contacts,{...next,file:source.name});
-      label.textContent = 'Добавится новых: ' + formatCount(result.added) +
-        ' · Совпадений: ' + formatCount(result.duplicates) +
+      label.textContent = 'Строк к проверке в базе: ' + formatCount(next.contacts.length) +
         (next.skipped ? ' · Пропущено: ' + formatCount(next.skipped) : '');
     }
     label.classList.toggle('error',Boolean(next.error));
@@ -1390,7 +1433,8 @@ function readBackup(data) {
       throw new Error('В копии повреждена история импорта.');
     }
     const {id,at,added,duplicates,skipped,updated} = log;
-    return {id,at,added,duplicates,skipped,updated,file:asText(log.file),sheet:asText(log.sheet),restore:Boolean(log.restore)};
+    return {id,at,added,duplicates,skipped,updated,file:asText(log.file),sheet:asText(log.sheet),restore:Boolean(log.restore),
+      ...(typeof log.source === 'string' ? {source:log.source} : {})};
   });
   return {contacts,logs};
 }

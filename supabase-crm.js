@@ -108,6 +108,12 @@
           p_revision:revision,p_leads:leads,p_imports:imports,p_assignments:assignments
         }));
       },
+      async archiveImport(importId,ids) {
+        return check(await client.rpc('zemlya_archive_import',{p_import_id:importId,p_ids:ids}));
+      },
+      async importDuplicates(importId) {
+        return check(await client.rpc('zemlya_import_duplicates',{p_import_id:importId}));
+      },
       async assign(ids,assignee) {
         return check(await client.rpc('zemlya_assign',{p_ids:ids,p_assignee:assignee}));
       },
